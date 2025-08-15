@@ -1,0 +1,133 @@
+import unittest
+import sqlite3
+from datetime import datetime
+
+# Import the classes we are testing
+from database.db_manager import DatabaseManager
+from core.models import WebsiteAnalysisResult, Cookie, Screenshot
+
+class TestDatabaseManager(unittest.TestCase):
+    """
+    Test suite for the DatabaseManager class using an in-memory database.
+    """
+
+    def setUp(self):
+        """
+        Set up a fresh, in-memory database for each test.
+        """
+        # The special ':memory:' path creates a database in RAM
+        self.db_manager = DatabaseManager(":memory:")
+        self.db_manager._create_tables()
+
+    def test_create_tables(self):
+        """
+        Verifies that the 'websites' and 'cookies' tables are created correctly.
+        """
+        conn = self.db_manager._get_connection()
+        cursor = conn.cursor()
+        
+        # Check if the tables exist
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = [row['name'] for row in cursor.fetchall()]
+        
+        self.assertIn('websites', tables)
+        self.assertIn('cookies', tables)
+        self.assertIn('screenshots', tables)
+        
+        conn.close()
+
+    def test_insert_analysis_result(self):
+        """
+        Tests that a full analysis result is correctly inserted into the database.
+        """
+        test_cookie_1 = Cookie(
+            name="test_cookie_1", value="1", domain="test.com", path="/",
+            expires=1735689600.0, secure=True, http_only=True, session_phase="initial"
+        )
+        test_cookie_2 = Cookie(
+            name="test_cookie_2", value="2", domain="test.com", path="/",
+            expires=1735689600.0, secure=False, http_only=False, session_phase="accepted"
+        )
+        test_screenshot_1 = Screenshot(
+            screenshot_type="initial", base64_data="dummy_base64_initial"
+        )
+        test_screenshot_2 = Screenshot(
+            screenshot_type="banner", base64_data="dummy_base64_banner"
+        )
+        test_result = WebsiteAnalysisResult(
+            url="https://test.com",
+            analysis_timestamp=datetime.now(),
+            has_cookie_banner=True,
+            cookie_banner_action="accepted",
+            privacy_policy_url="https://test.com/privacy",
+            cookie_policy_url="https://test.com/cookies",
+            cookies=[test_cookie_1, test_cookie_2],
+            screenshots=[test_screenshot_1, test_screenshot_2]
+        )
+        
+        self.db_manager.insert_analysis_result(test_result)
+        
+        conn = self.db_manager._get_connection()
+        cursor = conn.cursor()
+        
+        # Verify the website was inserted
+        cursor.execute("SELECT * FROM websites WHERE url='https://test.com'")
+        website_row = cursor.fetchone()
+        self.assertIsNotNone(website_row)
+        self.assertEqual(website_row['url'], 'https://test.com')
+        
+        # Verify the cookies were inserted and linked correctly
+        cursor.execute("SELECT * FROM cookies WHERE website_id=?", (website_row['id'],))
+        cookie_rows = cursor.fetchall()
+        self.assertEqual(len(cookie_rows), 2)
+        
+        cookie_names = [row['name'] for row in cookie_rows]
+        self.assertIn('test_cookie_1', cookie_names)
+        self.assertIn('test_cookie_2', cookie_names)
+
+        # Verify the screenshots were inserted and linked correctly
+        cursor.execute("SELECT * FROM screenshots WHERE website_id=?", (website_row['id'],))
+        screenshot_rows = cursor.fetchall()
+        self.assertEqual(len(screenshot_rows), 2)
+        
+        screenshot_types = [row['screenshot_type'] for row in screenshot_rows]
+        self.assertIn('initial', screenshot_types)
+        self.assertIn('banner', screenshot_types)
+        
+        conn.close()
+
+    def test_insert_duplicate_website(self):
+        """
+        Tests that inserting the same website twice does not cause an error
+        due to the UNIQUE constraint.
+        """
+        test_result = WebsiteAnalysisResult(
+            url="https://test.com",
+            analysis_timestamp=datetime.now(),
+            has_cookie_banner=False,
+            cookie_banner_action=None,
+            privacy_policy_url="https://test.com/privacy",
+            cookies=[],
+            screenshots=[]
+        )
+        
+        self.db_manager.insert_analysis_result(test_result)
+        
+        # Attempt to insert the same website again
+        self.db_manager.insert_analysis_result(test_result)
+        
+        conn = self.db_manager._get_connection()
+        cursor = conn.cursor()
+        
+        # Check that there is only one entry for the URL
+        cursor.execute("SELECT COUNT(*) FROM websites WHERE url='https://test.com'")
+        count = cursor.fetchone()[0]
+        self.assertEqual(count, 1)
+        
+        conn.close()
+
+
+if __name__ == '__main__':
+    # You can run these tests from the root of your project
+    # by using the command: python -m unittest tests/test_db_manager.py
+    unittest.main()
