@@ -1,3 +1,0 @@
-# Add one website URL per line. The script will iterate through this list.
-https://www.cm-pombal.pt/
-https://cm-beja.pt/

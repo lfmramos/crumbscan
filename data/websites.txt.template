@@ -1,0 +1,13 @@
+# Website list template for CrumbScan analysis
+# Copy this file to 'websites.txt' and add your target URLs
+#
+# Format: One URL per line
+# Comments starting with # are ignored
+# Empty lines are ignored
+#
+# Examples:
+# https://www.example.com/
+# https://www.company.pt/
+# https://www.municipality-site.gov.pt/
+#
+# Add your target websites below:

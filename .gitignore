@@ -54,6 +54,9 @@ screenshots/
 logs/
 *.log
 
+# Private data files (keep sensitive URLs out of repository)
+data/websites.txt
+
 # Temporary files
 *.tmp
 *.temp
