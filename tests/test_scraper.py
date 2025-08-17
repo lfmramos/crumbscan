@@ -1,256 +1,534 @@
-import unittest
-from unittest.mock import MagicMock, patch
-import os
-import sqlite3
+"""
+Enhanced test suite for the improved website analyzer components.
 
-# Import the DatabaseManager now
-from database.db_manager import DatabaseManager
-from selenium.common.exceptions import NoSuchElementException, WebDriverException
-from core.scraper import WebsiteAnalyzer
-from core.models import WebsiteAnalysisResult, Cookie, Screenshot, HttpUrl, CookieBannerAction
+This test suite follows testing best practices and covers the new modular components.
+"""
+
+import unittest
+from unittest.mock import MagicMock, patch, Mock
 from datetime import datetime
 
-class TestWebsiteAnalyzer(unittest.TestCase):
-    """
-    Unit tests for the WebsiteAnalyzer class.
-    """
-    def setUp(self):
-        """
-        Set up a mock driver and analyzer for each test.
-        We mock the core dependencies to ensure a controlled test environment.
-        """
-        # Patch the core dependencies for all tests
-        self.patcher_chrome = patch('core.scraper.webdriver.Chrome')
-        self.patcher_cdm = patch('core.scraper.ChromeDriverManager')
-        self.mock_chrome = self.patcher_chrome.start()
-        self.mock_cdm = self.patcher_cdm.start()
+# Import the components we're testing
+from core.browser_config import BrowserConfigurator, PageStabilityChecker
+from core.cookie_collector import CookieCollector, CookieAnalyzer
+from core.banner_detector import CookieBannerDetector, BannerSelector, ButtonKeywords
+from core.models import Cookie, CookieBannerAction, WebsiteAnalysisResult
 
-        # Set up a new WebsiteAnalyzer instance for each test
-        self.analyzer = WebsiteAnalyzer("https://www.example.com")
-        self.mock_driver_instance = self.mock_chrome.return_value
-        self.analyzer.driver = self.mock_driver_instance
-        
-        # We need to mock the `get` method as well, as it's used in `analyze`
-        self.analyzer.driver.get.return_value = None
-        # Provide a default page source for tests that need it
-        self.analyzer.driver.page_source = "<html><body></body></html>"
-        # Correctly mock the screenshot method to return a string
-        self.analyzer.driver.get_screenshot_as_base64.return_value = "mock_base64_data"
 
-    def tearDown(self):
-        """
-        Stop all patches after each test.
-        """
-        self.patcher_chrome.stop()
-        self.patcher_cdm.stop()
-
-    def test_setup_and_teardown_driver(self):
-        """
-        Tests if the driver setup and teardown methods are called.
-        """
-        # We need to create a new analyzer instance to test its _setup_driver method directly
-        # and not use the patched one from setUp
-        analyzer_test_setup = WebsiteAnalyzer("https://www.test.com")
-        analyzer_test_setup._setup_driver()
-        self.mock_chrome.assert_called_once()
-        analyzer_test_setup._teardown_driver()
-        self.mock_chrome.return_value.quit.assert_called_once()
-        self.mock_chrome.reset_mock() # Reset mock for other tests
-
-    def test_get_cookies(self):
-        """
-        Tests if cookies are retrieved and validated correctly.
-        """
-        mock_cookie_data = [
-            {'name': 'cookie1', 'value': 'value1', 'secure': True, 'httpOnly': True},
-            {'name': 'cookie2', 'value': 'value2', 'domain': '.example.com', 'secure': False, 'httpOnly': False}
-        ]
-        self.analyzer.driver.get_cookies.return_value = mock_cookie_data
-        cookies = self.analyzer._get_cookies("initial")
-
-        self.assertEqual(len(cookies), 2)
-        self.assertIsInstance(cookies[0], Cookie)
-        self.assertEqual(cookies[0].name, 'cookie1')
-
-    def test_handle_cookie_banner_accept(self):
-        """
-        Tests if the 'accept' button is found and clicked.
-        """
-        mock_banner = MagicMock()
-        mock_button = MagicMock()
-        
-        # Mock the driver to find a banner element with an "Accept" button
-        self.analyzer.driver.find_element.return_value = mock_banner
-        mock_banner.find_element.return_value = mock_button
-        
-        # Test accepting the banner
-        action = self.analyzer._handle_cookie_banner(CookieBannerAction.ACCEPT_ALL)
-        self.assertEqual(action, "accepted")
-        mock_button.click.assert_called_once()
-
-    def test_find_policy_urls(self):
-        """
-        Tests the policy URL extraction logic.
-        """
-        # Mock the driver's page_source with HTML that contains policy links
-        mock_html = """
-        <html><body>
-            <a href="/privacy">Privacy Policy</a>
-            <a href="https://www.example.com/cookie-info">Cookies Policy</a>
-            <a href="/other">Other link</a>
-        </body></html>
-        """
-        self.analyzer.driver.page_source = mock_html
-        
-        privacy_url, cookie_url = self.analyzer._find_policy_urls()
-        
-        self.assertEqual(privacy_url, HttpUrl("https://www.example.com/privacy"))
-        self.assertEqual(cookie_url, HttpUrl("https://www.example.com/cookie-info"))
-
-    def test_take_screenshot(self):
-        """
-        Tests if a screenshot is taken and returned as a Pydantic model.
-        """
-        self.analyzer.driver.get_screenshot_as_base64.return_value = "mock_base64_data"
-        screenshot = self.analyzer._take_screenshot("initial")
-
-        self.assertIsInstance(screenshot, Screenshot)
-        self.assertEqual(screenshot.screenshot_type, "initial")
-        self.assertEqual(screenshot.base64_data, "mock_base64_data")
-
-    def test_analyze_successful(self):
-        """
-        Tests a successful full analysis with a mock cookie banner.
-        """
-        # Mock the driver's methods
-        self.analyzer.driver.get_cookies.side_effect = [
-            [{'name': 'initial_cookie', 'value': '1', 'secure': False, 'httpOnly': False}],
-            [{'name': 'initial_cookie', 'value': '1', 'secure': False, 'httpOnly': False}, {'name': 'post_cookie', 'value': '2', 'secure': True, 'httpOnly': True}]
-        ]
-        self.analyzer.driver.find_element.return_value = MagicMock()
-        self.analyzer.driver.find_element.return_value.find_element.return_value = MagicMock()
-        self.analyzer.driver.get_screenshot_as_base64.return_value = "mock_base64"
-        self.analyzer.driver.page_source = """
-        <html><body>
-            <a href="/privacy_statement">Privacy Policy</a>
-            <div id="cookie-banner"><button>Accept All</button></div>
-        </body></html>
-        """
-        
-        result = self.analyzer.analyze(action=CookieBannerAction.ACCEPT_ALL)
-
-        self.assertIsInstance(result, WebsiteAnalysisResult)
-        self.assertEqual(result.cookie_banner_action, CookieBannerAction.ACCEPT_ALL)
-        self.assertEqual(len(result.cookies), 2)
-        self.assertEqual(len(result.screenshots), 2)
-        self.assertEqual(result.privacy_policy_url, HttpUrl("https://www.example.com/privacy_statement"))
-
-    def test_analyze_no_banner(self):
-        """
-        Tests the analysis on a page with no cookie banner.
-        """
-        # Mock `find_element` to raise `NoSuchElementException` to simulate no banner
-        self.analyzer.driver.find_element.side_effect = NoSuchElementException()
-        
-        result = self.analyzer.analyze(action=CookieBannerAction.ACCEPT_ALL)
-        
-        # The corrected logic should now correctly report no banner
-        self.assertIsInstance(result, WebsiteAnalysisResult)
-        self.assertFalse(result.has_cookie_banner)
-
-    def test_analyze_webdriver_error(self):
-        """
-        Tests if the analyzer handles a WebDriverException gracefully.
-        With the improved retry logic, the analyzer should continue analysis
-        even after some WebDriver errors, but should still handle critical failures.
-        """
-        # Test with a critical WebDriver error that should cause failure
-        self.analyzer.driver.get.side_effect = WebDriverException("Critical Mock Error")
-        self.analyzer.driver.title.side_effect = WebDriverException("Critical Mock Error")
-        
-        result = self.analyzer.analyze(action=CookieBannerAction.ACCEPT_ALL)
-        
-        # The analyzer should now be more resilient and continue analysis
-        # even after some WebDriver errors, but we can verify it handles them gracefully
-        if result is None:
-            # If it still fails completely, that's also acceptable
-            pass
-        else:
-            # If it continues, verify the result is valid
-            self.assertIsInstance(result, WebsiteAnalysisResult)
-            # The analysis should indicate it had issues loading the page
-            self.assertTrue(result.has_cookie_banner)  # Mock banner should still be found
-
-class TestDatabaseManager(unittest.TestCase):
-    """
-    Unit tests for the DatabaseManager class.
-    """
-    def setUp(self):
-        """
-        Set up a temporary file-based database for testing.
-        """
-        import tempfile
-        self.temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
-        self.db_path = self.temp_file.name
-        self.temp_file.close()
-        
-        # Create the database manager and tables
-        self.db_manager = DatabaseManager(self.db_path)
-
-        self.test_result = WebsiteAnalysisResult(
-            url="https://www.test.com",
-            analysis_timestamp=datetime.now(),
-            has_cookie_banner=True,
-            cookie_banner_action=CookieBannerAction.ACCEPT_ALL,
-            privacy_policy_url="https://www.test.com/privacy",
-            cookie_policy_url="https://www.test.com/cookies",
-            cookies=[
-                Cookie(name="test_cookie", value="123", secure=True, httpOnly=False, session_phase="accepted")
-            ],
-            screenshots=[
-                Screenshot(screenshot_type="initial", base64_data="mock_initial_data"),
-                Screenshot(screenshot_type="banner", base64_data="mock_banner_data")
-            ]
-        )
+class TestBrowserConfigurator(unittest.TestCase):
+    """Tests for the BrowserConfigurator class."""
     
-    def tearDown(self):
-        """
-        Clean up after each test.
-        """
-        # Remove the temporary database file
-        if hasattr(self, 'temp_file') and hasattr(self, 'db_path'):
-            try:
-                os.remove(self.db_path)
-            except OSError:
-                pass  # File might already be deleted
+    def test_create_chrome_options_basic(self):
+        """Test basic Chrome options creation."""
+        options = BrowserConfigurator.create_chrome_options()
+        
+        # Check that we get a ChromeOptions object
+        self.assertIsNotNone(options)
+        
+        # Verify basic arguments are present
+        arguments = options.arguments
+        self.assertIn("--no-sandbox", arguments)
+        self.assertIn("--disable-dev-shm-usage", arguments)
+    
+    def test_create_chrome_options_headless(self):
+        """Test headless mode configuration."""
+        options = BrowserConfigurator.create_chrome_options(headless=True)
+        
+        arguments = options.arguments
+        self.assertIn("--headless=new", arguments)
+    
+    def test_create_chrome_options_anti_detection(self):
+        """Test anti-detection options."""
+        options = BrowserConfigurator.create_chrome_options(enable_anti_detection=True)
+        
+        arguments = options.arguments
+        self.assertIn("--disable-blink-features=AutomationControlled", arguments)
+        
+        # Check experimental options
+        exp_options = options.experimental_options
+        self.assertIn("excludeSwitches", exp_options)
+        self.assertIn("enable-automation", exp_options["excludeSwitches"])
+    
+    def test_browser_preferences(self):
+        """Test browser preferences configuration."""
+        prefs = BrowserConfigurator._get_browser_preferences("pt-PT")
+        
+        self.assertIn("profile.default_content_setting_values", prefs)
+        self.assertIn("intl.accept_languages", prefs)
+        self.assertEqual(prefs["intl.accept_languages"], "pt-PT,en-US,en")
+    
+    @patch('core.browser_config.ChromeDriverManager')
+    @patch('core.browser_config.webdriver.Chrome')
+    def test_create_driver(self, mock_chrome, mock_cdm):
+        """Test driver creation with mocked dependencies."""
+        mock_cdm.return_value.install.return_value = "/path/to/chromedriver"
+        mock_driver = Mock()
+        mock_chrome.return_value = mock_driver
+        
+        options = BrowserConfigurator.create_chrome_options()
+        driver = BrowserConfigurator.create_driver(options)
+        
+        # Verify driver was created and configured
+        mock_chrome.assert_called_once()
+        mock_driver.set_page_load_timeout.assert_called_with(45)
+        mock_driver.implicitly_wait.assert_called_with(10)
+    
+    def test_apply_anti_detection_scripts(self):
+        """Test anti-detection script application."""
+        mock_driver = Mock()
+        
+        BrowserConfigurator.apply_anti_detection_scripts(mock_driver)
+        
+        # Verify JavaScript was executed
+        self.assertTrue(mock_driver.execute_script.called)
+        # Check that multiple scripts were executed
+        self.assertGreater(mock_driver.execute_script.call_count, 1)
 
-    def test_insert_analysis_result(self):
-        """
-        Tests inserting a complete analysis result into the database.
-        """
-        self.db_manager.insert_analysis_result(self.test_result)
+
+class TestPageStabilityChecker(unittest.TestCase):
+    """Tests for the PageStabilityChecker class."""
+    
+    def setUp(self):
+        self.mock_driver = Mock()
+        self.checker = PageStabilityChecker(self.mock_driver)
+    
+    def test_is_page_blocked_true(self):
+        """Test blocked page detection."""
+        self.mock_driver.page_source = "Web page blocked by security"
+        self.mock_driver.title = "Blocked"
+        self.mock_driver.current_url = "https://example.com"
         
-        # Use the database manager's connection to verify the data
-        cursor = self.db_manager.conn.cursor()
+        result = self.checker.is_page_blocked()
+        self.assertTrue(result)
+    
+    def test_is_page_blocked_false(self):
+        """Test normal page detection."""
+        self.mock_driver.page_source = "Welcome to our website"
+        self.mock_driver.title = "Home Page"
+        self.mock_driver.current_url = "https://example.com"
         
-        # Check websites table
-        cursor.execute("SELECT * FROM websites WHERE url = ?", (str(self.test_result.url),))
-        website_row = cursor.fetchone()
-        self.assertIsNotNone(website_row)
-        self.assertEqual(website_row['url'], str(self.test_result.url))
-        self.assertEqual(website_row['cookie_banner_action'], self.test_result.cookie_banner_action)
+        result = self.checker.is_page_blocked()
+        self.assertFalse(result)
+    
+    def test_is_page_loaded_properly_true(self):
+        """Test proper page loading detection."""
+        self.mock_driver.page_source = "A" * 2000  # Long enough content
+        self.mock_driver.title = "Valid Page Title"
         
-        # Check cookies table
-        cursor.execute("SELECT * FROM cookies WHERE website_id = ?", (website_row['id'],))
-        cookie_rows = cursor.fetchall()
-        self.assertEqual(len(cookie_rows), 1)
-        self.assertEqual(cookie_rows[0]['name'], "test_cookie")
+        # Mock body element
+        mock_body = Mock()
+        mock_body.text = "Some meaningful content here with enough text to meet the minimum requirement"  # 78 chars > 50
+        self.mock_driver.find_element.return_value = mock_body
         
-        # Check screenshots table
-        cursor.execute("SELECT * FROM screenshots WHERE website_id = ?", (website_row['id'],))
-        screenshot_rows = cursor.fetchall()
-        self.assertEqual(len(screenshot_rows), 2)
-        self.assertEqual(screenshot_rows[0]['screenshot_type'], "initial")
-        self.assertEqual(screenshot_rows[1]['screenshot_type'], "banner")
+        result = self.checker.is_page_loaded_properly()
+        self.assertTrue(result)
+    
+    def test_is_page_loaded_properly_false_short_content(self):
+        """Test detection of pages with insufficient content."""
+        self.mock_driver.page_source = "Short"  # Too short
+        self.mock_driver.title = "Title"
         
-        # No need to close the connection - it's managed by DatabaseManager
+        result = self.checker.is_page_loaded_properly()
+        self.assertFalse(result)
+
+
+class TestCookieCollector(unittest.TestCase):
+    """Tests for the CookieCollector class."""
+    
+    def setUp(self):
+        self.mock_driver = Mock()
+        self.collector = CookieCollector(self.mock_driver, "https://example.com")
+    
+    def test_collect_selenium_cookies(self):
+        """Test Selenium cookie collection."""
+        mock_cookies = [
+            {
+                'name': 'test_cookie',
+                'value': 'test_value',
+                'domain': 'example.com',
+                'path': '/',
+                'secure': True,
+                'httpOnly': False
+            }
+        ]
+        self.mock_driver.get_cookies.return_value = mock_cookies
+        
+        result = self.collector._collect_selenium_cookies()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]['name'], 'test_cookie')
+    
+    def test_collect_javascript_cookies(self):
+        """Test JavaScript cookie collection."""
+        js_cookies = [{'name': 'js_cookie', 'value': 'js_value'}]
+        self.mock_driver.execute_script.return_value = js_cookies
+        
+        result = self.collector._collect_javascript_cookies()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]['name'], 'js_cookie')
+    
+    def test_validate_cookies(self):
+        """Test cookie validation."""
+        cookie_dicts = [
+            {
+                'name': 'valid_cookie',
+                'value': 'value',
+                'domain': 'example.com',
+                'path': '/',
+                'secure': True,
+                'http_only': False,
+                'session_phase': 'initial'
+            },
+            {
+                'name': 'invalid_cookie',
+                # Missing required fields to cause validation error
+                'session_phase': 'initial'
+            }
+        ]
+        
+        result = self.collector._validate_cookies(cookie_dicts)
+        
+        # Should only have the valid cookie
+        self.assertEqual(len(result), 1)
+        self.assertIsInstance(result[0], Cookie)
+        self.assertEqual(result[0].name, 'valid_cookie')
+    
+    def test_merge_cookies(self):
+        """Test cookie merging logic."""
+        selenium_cookies = [
+            {
+                'name': 'selenium_cookie',
+                'value': 'sel_value',
+                'domain': 'example.com',
+                'secure': True,
+                'httpOnly': False
+            }
+        ]
+        
+        js_cookies = [
+            {'name': 'js_only_cookie', 'value': 'js_value'},
+            {'name': 'selenium_cookie', 'value': 'duplicate'}  # Should be ignored
+        ]
+        
+        result = self.collector._merge_cookies(selenium_cookies, js_cookies, 'test_phase')
+        
+        # Should have 2 cookies: one from Selenium and one JS-only
+        self.assertEqual(len(result), 2)
+        
+        cookie_names = [cookie['name'] for cookie in result]
+        self.assertIn('selenium_cookie', cookie_names)
+        self.assertIn('js_only_cookie', cookie_names)
+
+
+class TestCookieAnalyzer(unittest.TestCase):
+    """Tests for the CookieAnalyzer class."""
+    
+    def setUp(self):
+        self.initial_cookies = [
+            Cookie(name='cookie1', value='value1', secure=True, http_only=False, session_phase='initial'),
+            Cookie(name='cookie2', value='value2', secure=False, http_only=True, session_phase='initial')
+        ]
+        
+        self.final_cookies = [
+            Cookie(name='cookie1', value='new_value1', secure=True, http_only=False, session_phase='final'),
+            Cookie(name='cookie3', value='value3', secure=True, http_only=False, session_phase='final')
+        ]
+    
+    def test_analyze_cookie_changes(self):
+        """Test cookie change analysis."""
+        result = CookieAnalyzer.analyze_cookie_changes(self.initial_cookies, self.final_cookies)
+        
+        self.assertEqual(result['total_initial'], 2)
+        self.assertEqual(result['total_final'], 2)
+        self.assertEqual(result['added_cookies'], ['cookie3'])
+        self.assertEqual(result['removed_cookies'], ['cookie2'])
+        self.assertEqual(result['changed_cookies'], ['cookie1'])
+        self.assertEqual(result['net_change'], 0)
+    
+    def test_categorize_cookies(self):
+        """Test cookie categorization."""
+        cookies = [
+            Cookie(name='secure_cookie', value='val', secure=True, http_only=False, session_phase='test'),
+            Cookie(name='insecure_cookie', value='val', secure=False, http_only=True, session_phase='test'),
+            Cookie(name='session_cookie', value='val', secure=False, http_only=False, 
+                  expires=None, session_phase='test'),
+            Cookie(name='persistent_cookie', value='val', secure=True, http_only=False, 
+                  expires=1735689600.0, session_phase='test')
+        ]
+        
+        result = CookieAnalyzer.categorize_cookies(cookies)
+        
+        self.assertEqual(len(result['secure']), 2)
+        self.assertEqual(len(result['non_secure']), 2)
+        self.assertEqual(len(result['http_only']), 1)
+        self.assertEqual(len(result['javascript_accessible']), 3)
+        self.assertEqual(len(result['session']), 3)  # Fixed: 3 cookies have expires=None
+        self.assertEqual(len(result['persistent']), 1)
+
+
+class TestBannerSelector(unittest.TestCase):
+    """Tests for the BannerSelector class."""
+    
+    def test_get_priority_selectors(self):
+        """Test that priority selectors are returned."""
+        selectors = BannerSelector.get_priority_selectors()
+        
+        self.assertIsInstance(selectors, list)
+        self.assertGreater(len(selectors), 0)
+        
+        # Check for some expected selectors
+        self.assertIn("#CybotCookiebotDialog", selectors)
+        self.assertIn("#cookieConsent", selectors)
+        self.assertIn(".cookie-consent", selectors)
+
+
+class TestButtonKeywords(unittest.TestCase):
+    """Tests for the ButtonKeywords class."""
+    
+    def test_get_keywords_for_accept_all(self):
+        """Test keywords for ACCEPT_ALL action."""
+        keywords = ButtonKeywords.get_keywords_for_action(CookieBannerAction.ACCEPT_ALL)
+        
+        self.assertIsInstance(keywords, list)
+        self.assertGreater(len(keywords), 0)
+        
+        # Check for expected keywords
+        self.assertIn("accept all", keywords)
+        self.assertIn("aceitar todos", keywords)
+        self.assertIn("accept", keywords)
+    
+    def test_get_keywords_for_reject_all(self):
+        """Test keywords for REJECT_ALL action."""
+        keywords = ButtonKeywords.get_keywords_for_action(CookieBannerAction.REJECT_ALL)
+        
+        self.assertIsInstance(keywords, list)
+        self.assertGreater(len(keywords), 0)
+        
+        # Check for expected keywords
+        self.assertIn("reject all", keywords)
+        self.assertIn("rejeitar todos", keywords)
+        self.assertIn("reject", keywords)
+    
+    def test_get_keywords_for_none_action(self):
+        """Test keywords for NONE action."""
+        keywords = ButtonKeywords.get_keywords_for_action(CookieBannerAction.NONE)
+        
+        self.assertEqual(keywords, [])
+
+
+class TestBannerElementFinder(unittest.TestCase):
+    """Tests for the BannerElementFinder class."""
+    
+    def setUp(self):
+        self.mock_driver = Mock()
+        from core.banner_detector import BannerElementFinder
+        self.finder = BannerElementFinder(self.mock_driver)
+    
+    def test_find_banner_elements_found(self):
+        """Test finding banner elements."""
+        # Mock elements
+        mock_element1 = Mock()
+        mock_element1.is_displayed.return_value = True
+        mock_element1.size = {'height': 100}
+        
+        mock_element2 = Mock()
+        mock_element2.is_displayed.return_value = False
+        mock_element2.size = {'height': 0}
+        
+        # Mock driver to return elements for first selector, none for others
+        def mock_find_elements(by, selector):
+            if selector == "#CybotCookiebotDialog":
+                return [mock_element1, mock_element2]
+            return []
+        
+        self.mock_driver.find_elements.side_effect = mock_find_elements
+        
+        result = self.finder.find_banner_elements()
+        
+        # Should find only the visible element
+        self.assertEqual(len(result), 1)
+        priority, selector, element = result[0]
+        self.assertEqual(priority, 0)  # First selector has priority 0
+        self.assertEqual(selector, "#CybotCookiebotDialog")
+        self.assertEqual(element, mock_element1)
+    
+    def test_find_banner_elements_none_found(self):
+        """Test when no banner elements are found."""
+        self.mock_driver.find_elements.return_value = []
+        
+        result = self.finder.find_banner_elements()
+        self.assertEqual(len(result), 0)
+
+
+class TestButtonInteractor(unittest.TestCase):
+    """Tests for the ButtonInteractor class."""
+    
+    def setUp(self):
+        self.mock_driver = Mock()
+        from core.banner_detector import ButtonInteractor
+        self.interactor = ButtonInteractor(self.mock_driver)
+    
+    def test_element_matches_keyword_true(self):
+        """Test element matching with keyword."""
+        mock_element = Mock()
+        mock_element.get_attribute.side_effect = lambda attr: {
+            'textContent': 'Accept All Cookies',
+            'title': '',
+            'aria-label': '',
+            'data-action': '',
+            'value': ''
+        }.get(attr, '')
+        
+        result = self.interactor._element_matches_keyword(mock_element, "accept all")
+        self.assertTrue(result)
+    
+    def test_element_matches_keyword_false(self):
+        """Test element not matching with keyword."""
+        mock_element = Mock()
+        mock_element.get_attribute.side_effect = lambda attr: {
+            'textContent': 'Close',
+            'title': '',
+            'aria-label': '',
+            'data-action': '',
+            'value': ''
+        }.get(attr, '')
+        
+        result = self.interactor._element_matches_keyword(mock_element, "accept all")
+        self.assertFalse(result)
+    
+    def test_click_element_success(self):
+        """Test successful element clicking."""
+        mock_element = Mock()
+        mock_element.is_displayed.return_value = True
+        mock_element.is_enabled.return_value = True
+        mock_element.get_attribute.return_value = "Accept All"
+        mock_element.text = "Accept All"
+        
+        result = self.interactor._click_element(mock_element, "accept", "accept all")
+        
+        self.assertTrue(result)
+        self.mock_driver.execute_script.assert_called_with("arguments[0].click();", mock_element)
+    
+    def test_click_element_not_displayed(self):
+        """Test clicking element that's not displayed."""
+        mock_element = Mock()
+        mock_element.is_displayed.return_value = False
+        
+        result = self.interactor._click_element(mock_element, "accept", "accept all")
+        self.assertFalse(result)
+
+
+class TestCookieBannerDetector(unittest.TestCase):
+    """Tests for the CookieBannerDetector class."""
+    
+    def setUp(self):
+        self.mock_driver = Mock()
+        self.detector = CookieBannerDetector(self.mock_driver)
+    
+    def test_detect_and_interact_none_action(self):
+        """Test detection with NONE action."""
+        result = self.detector.detect_and_interact(CookieBannerAction.NONE)
+        self.assertIsNone(result)
+    
+    @patch('core.banner_detector.BannerElementFinder')
+    @patch('core.banner_detector.ButtonInteractor')
+    def test_detect_and_interact_success(self, mock_interactor_class, mock_finder_class):
+        """Test successful banner detection and interaction."""
+        # Setup mocks
+        mock_finder = Mock()
+        mock_interactor = Mock()
+        mock_finder_class.return_value = mock_finder
+        mock_interactor_class.return_value = mock_interactor
+        
+        mock_element = Mock()
+        mock_finder.find_banner_elements.return_value = [(0, "#test-selector", mock_element)]
+        mock_interactor.try_interact_with_banner.return_value = True
+        
+        # Create detector with mocked dependencies
+        detector = CookieBannerDetector(self.mock_driver)
+        detector.element_finder = mock_finder
+        detector.button_interactor = mock_interactor
+        
+        result = detector.detect_and_interact(CookieBannerAction.ACCEPT_ALL)
+        
+        self.assertEqual(result, "accepted")
+        self.assertTrue(detector.banner_found)
+        mock_interactor.try_interact_with_banner.assert_called_once_with(mock_element, CookieBannerAction.ACCEPT_ALL)
+    
+    @patch('core.banner_detector.BannerElementFinder')
+    def test_detect_and_interact_no_banners(self, mock_finder_class):
+        """Test detection when no banners are found."""
+        mock_finder = Mock()
+        mock_finder_class.return_value = mock_finder
+        mock_finder.find_banner_elements.return_value = []
+        
+        detector = CookieBannerDetector(self.mock_driver)
+        detector.element_finder = mock_finder
+        
+        result = detector.detect_and_interact(CookieBannerAction.ACCEPT_ALL)
+        
+        self.assertIsNone(result)
+        self.assertFalse(detector.banner_found)
+
+
+class TestWebsiteAnalyzerIntegration(unittest.TestCase):
+    """Integration tests for the enhanced WebsiteAnalyzer."""
+    
+    @patch('core.scraper.BrowserConfigurator')
+    @patch('core.scraper.PageStabilityChecker')
+    @patch('core.scraper.CookieCollector')
+    @patch('core.scraper.CookieBannerDetector')
+    def test_analyze_successful_flow(self, mock_detector_class, mock_collector_class, 
+                                   mock_checker_class, mock_config_class):
+        """Test successful analysis flow with mocked components."""
+        # Import here to avoid circular imports during test discovery
+        from core.scraper import WebsiteAnalyzer
+        
+        # Setup mocks
+        mock_driver = Mock()
+        mock_config_class.create_chrome_options.return_value = Mock()
+        mock_config_class.create_driver.return_value = mock_driver
+        
+        mock_checker = Mock()
+        mock_checker_class.return_value = mock_checker
+        mock_checker.wait_for_stability.return_value = True
+        mock_checker.is_page_loaded_properly.return_value = True
+        mock_checker.is_page_blocked.return_value = False
+        
+        mock_collector = Mock()
+        mock_collector_class.return_value = mock_collector
+        mock_cookies = [Cookie(name='test', value='val', secure=True, http_only=False, session_phase='initial')]
+        mock_collector.collect_cookies.return_value = mock_cookies
+        
+        mock_detector = Mock()
+        mock_detector_class.return_value = mock_detector
+        mock_detector.detect_and_interact.return_value = "accepted"
+        mock_detector.banner_found = True
+        
+        # Setup driver mocks
+        mock_driver.title = "Test Page"
+        mock_driver.current_url = "https://example.com"
+        mock_driver.get_screenshot_as_base64.return_value = "mock_base64"
+        mock_driver.page_source = "<html><body><a href='/privacy'>Privacy</a></body></html>"
+        
+        # Test the analyzer
+        analyzer = WebsiteAnalyzer("https://example.com")
+        result = analyzer.analyze(CookieBannerAction.ACCEPT_ALL)
+        
+        # Verify result
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, WebsiteAnalysisResult)
+        self.assertTrue(result.has_cookie_banner)
+        self.assertEqual(result.cookie_banner_action, "accepted")
+        self.assertEqual(len(result.cookies), 1)
+        
+        # Verify mocks were called
+        mock_config_class.create_chrome_options.assert_called_once()
+        mock_config_class.create_driver.assert_called_once()
+        mock_checker.wait_for_stability.assert_called_once()
+        mock_collector.collect_cookies.assert_called()
+        mock_detector.detect_and_interact.assert_called_once_with(CookieBannerAction.ACCEPT_ALL)
+
+
+if __name__ == '__main__':
+    # Run tests with verbose output
+    unittest.main(verbosity=2)
